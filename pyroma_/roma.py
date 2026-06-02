@@ -4,6 +4,10 @@ PyROMA: Python implementation of Representation Of Module Activity for single-ce
 This module implements the ROMA algorithm for quantifying gene set activity
 in single-cell transcriptomics data using principal component analysis.
 """
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent))
+from t_mfa import t_MFA
 
 import numpy as np
 import pandas as pd
@@ -18,6 +22,7 @@ from statsmodels.stats.multitest import multipletests
 from scipy.stats import false_discovery_control as benj_hoch
 from sklearn.decomposition import TruncatedSVD, PCA, IncrementalPCA
 from sklearn.model_selection import LeaveOneOut
+import prince
 from joblib import Parallel, delayed
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple, Union, Any
@@ -36,6 +41,29 @@ class color:
     DARKCYAN = '\033[36m'
     END = '\033[0m'
 
+#Class object to wrap the MFA results and get the right attributes
+class MFA_wrapper:
+    """
+    Wrapper for MFA:
+
+    Attributes
+    ------------
+    explained_variance_ratio_ : np.array
+        ratio of explained variance, from MFA eigenvalues
+    components_ : np.array
+        first factors (equivalent of PC1/PC2 in PCA)
+    """
+    def __init__(self, 
+                 mfa: t_MFA,
+                 L1_calculation : str) -> None:
+        """Initialize GeneSetResult with basic attributes."""
+        if L1_calculation=="normal":
+            self.explained_variance_ratio_ = mfa.eigenvalues_ / mfa.total_inertia_
+        else:
+            prot_variance_ratio=mfa['prot'].eigenvalues_ / mfa["prot"].total_inertia_
+            transcri_variance_ratio=mfa['transcri'].eigenvalues_ / mfa["transcri"].total_inertia_
+            self.explained_variance_ratio_=np.mean([prot_variance_ratio,transcri_variance_ratio], axis=0)
+        self.components_ = mfa.column_coordinates_.to_numpy().T
 
 class GeneSetResult:
     """
@@ -160,6 +188,7 @@ class ROMA:
         self.global_gene_counts: Dict[str, int] = {}
         self.global_outlier_counts: Dict[str, int] = {}
         self.svd: Optional[Union[TruncatedSVD, PCA, IncrementalPCA]] = None
+        self.gsvd: Optional[Union[MFA]] = None
         self.X: Optional[np.ndarray] = None
         self.raw_X_subset: Optional[np.ndarray] = None
         self.nulll1: List[float] = []
@@ -354,7 +383,7 @@ class ROMA:
         # If not cached, will be computed elsewhere
         return None, None
 
-    def loocv(self, subset: sc.AnnData, verbose: int = 0, for_randomset: bool = False) -> List[int]:
+    def loocv(self, subset: sc.AnnData, multiomics: bool = False, verbose: int = 0, for_randomset: bool = False) -> List[int]:
         """
         Perform leave-one-out cross-validation for outlier detection.
         
@@ -365,6 +394,8 @@ class ROMA:
         ----------
         subset : sc.AnnData
             Subset of data for current gene set
+        multiomics : bool
+            Whether data are multiomics 
         verbose : int, default=0
             Verbosity level
         for_randomset : bool, default=False
@@ -378,6 +409,8 @@ class ROMA:
         #X = self._prepare_data(subset.X.T)
         X = self.subset.X.T
         n_features, n_samples = X.shape
+        if multiomics:
+            X_df=self.anndata_to_multiindex_df(self.subset, feature_col="feature type").T.copy() #to have the right type for MFA
         X = np.asarray(X)
         if n_samples < 2:
             if verbose:
@@ -386,12 +419,29 @@ class ROMA:
 
         # Vectorized computation of L1 scores
         l1scores = np.zeros(n_features)
-        svd = TruncatedSVD(n_components=1, algorithm='randomized', n_oversamples=2, random_state=42)
+        
+        if multiomics:
+            mfa=t_MFA(n_components=1,     #number of principal components to compute
+                            n_iter=3,               #number of iterations used for computing the SVD
+                            copy=True,              #whether to perform the computations inplace
+                            check_input=True,       #checks non-empty 2D array containing only finite values (using sklearn.utils.checkarray)
+                            engine='sklearn',       #which svd method to use for PCA
+                            which_mfa=self.which_mfa,
+                            random_state=42         #seed
+                            )
+        else:
+            svd = TruncatedSVD(n_components=1, algorithm='randomized', n_oversamples=2, random_state=42)
 
         # Use efficient leave-one-out
         loo = LeaveOneOut()
         for i, (train_index, _) in enumerate(loo.split(X)):
-            svd.fit(X[train_index])
+            if multiomics:
+                #import pdb
+                #pdb.set_trace()
+                mfa.fit(X_df.iloc[train_index],groups=X_df.iloc[train_index].T.columns.get_level_values(0).unique().tolist())
+                svd=MFA_wrapper(mfa, L1_calculation="normal")
+            else:
+                svd.fit(X[train_index])
             l1scores[i] = svd.explained_variance_ratio_[0]
         
         # Store scores for each gene
@@ -588,6 +638,114 @@ class ROMA:
             self.X = X
 
         return svd_, X
+
+    import pandas as pd
+    import scipy.sparse as sp
+
+    @staticmethod
+    def anndata_to_multiindex_df(adata, feature_col="feature type"):
+        """
+        Convert AnnData to a pandas DataFrame with column MultiIndex
+        where level 0 = feature type and level 1 = feature name.
+        """
+
+        # build MultiIndex
+        columns = pd.MultiIndex.from_arrays(
+            [adata.var[feature_col].values, adata.var_names.values],
+            names=[feature_col, "feature"]
+        )
+
+        X = adata.X
+
+        # sparse case (preferred for large data)
+        if sp.issparse(X):
+            df = pd.DataFrame.sparse.from_spmatrix(
+                X,
+                index=adata.obs_names,
+                columns=columns
+            )
+        else:
+            df = pd.DataFrame(
+                X,
+                index=adata.obs_names,
+                columns=columns
+            )
+
+        return df
+
+    def robustMFA(self, 
+                adata: sc.AnnData, 
+                subsetlist: np.ndarray, 
+                outliers: List[int], 
+                for_randomset: bool = False ) -> Tuple[t_MFA, np.ndarray]:
+        # Filter outliers to only include valid indices for current gene_subset
+        outliers_array = np.array(outliers)
+        valid_outliers = outliers_array[outliers_array < len(subsetlist)]
+        
+        # Create boolean mask for genes (excluding outliers)
+        mask = np.ones(len(subsetlist), dtype=bool)
+        if len(valid_outliers) > 0:
+            mask[valid_outliers] = False
+        
+        # Get the subset of genes excluding outliers
+        robust_gene_subset = subsetlist[mask]
+        
+        if len(robust_gene_subset) < 2:
+            # Return zeros if too few genes remain
+            return None, None
+            
+        # Extract data for robust gene subset
+        X_df=self.anndata_to_multiindex_df(adata[:, robust_gene_subset], feature_col="feature type").copy()
+        
+        if hasattr(X_df, 'toarray'):
+            raise ValueError("Case has not been considered yet")
+            X_df = X_df.toarray()
+            
+        X_df = X_df.T  # Transpose to have genes as rows, samples as columns
+        
+        # Center the data
+        #X = X - X.mean(axis=1, keepdims=True)
+        # Perform MFA
+        """
+        try:
+            mfa  = t_MFA(n_components=2,         #number of principal components to compute
+                            n_iter=100,             #number of iterations used for computing the SVD
+                            copy=True,              #whether to perform the computations inplace
+                            check_input=True,       #checks non-empty 2D array containing only finite values (using sklearn.utils.checkarray)
+                            engine='sklearn',       #which svd method to use for PCA
+                            which_mfa=self.which_mfa,
+                            random_state=42         #seed
+                            )
+            mfa.fit(X_df,
+                        groups=X_df.T.columns.levels[0].tolist(),  #types of multi-omics data to consider
+                        supplementary_groups=None)
+
+            svd_ = MFA_wrapper(mfa, L1_calculation="normal")
+            
+        except Exception as e:
+            print(f"MFA failed: {e}")
+            return None, None
+        """
+
+        mfa  = t_MFA(n_components=2,         #number of principal components to compute
+                            n_iter=100,             #number of iterations used for computing the SVD
+                            copy=True,              #whether to perform the computations inplace
+                            check_input=True,       #checks non-empty 2D array containing only finite values (using sklearn.utils.checkarray)
+                            engine='sklearn',       #which svd method to use for PCA
+                            which_mfa=self.which_mfa,
+                            random_state=42         #seed
+                            )
+        mfa.fit(X_df,
+                    groups=X_df.T.columns.levels[0].tolist(),  #types of multi-omics data to consider
+                    supplementary_groups=None)
+
+        svd_ = MFA_wrapper(mfa, L1_calculation="normal")
+        
+        if not for_randomset:
+            self.svd = svd_
+            self.X = X_df
+            
+        return svd_, X_df
 
 
     def robustPCA(self, 
@@ -927,13 +1085,14 @@ class ROMA:
         
         # Compute median
         median_exp = np.median(projections_1)
-        
+
         return median_exp, projections_1, projections_2
 
     def process_iteration(self, 
                             sequence: np.ndarray, 
                             idx: np.ndarray, 
-                            iteration: int, 
+                            iteration: int,
+                            multiomics: bool,
                             incremental: bool, 
                             partial_fit: bool, 
                             algorithm: str) -> Tuple[float, float, np.ndarray, np.ndarray]:
@@ -948,6 +1107,8 @@ class ROMA:
             Gene indices
         iteration : int
             Current iteration number
+        multiomics : bool
+            Whether data are multi or simple omics
         incremental : bool
             Whether to use incremental PCA
         partial_fit : bool
@@ -972,9 +1133,12 @@ class ROMA:
         subset = np.random.choice(sequence, self.nullgenesetsize, replace=False)
         gene_subset = np.array([x for i, x in enumerate(idx) if i in subset])
         
-        outliers = self.loocv(self.adata[:, gene_subset], for_randomset=True)
-        
-        if incremental:
+        outliers = self.loocv(self.adata[:, gene_subset], multiomics, for_randomset=True)
+
+        if multiomics:
+            svd_, X = self.robustMFA(self.adata, gene_subset, outliers, 
+                                        for_randomset=True)
+        elif incremental:
             svd_, X = self.robustIncrementalPCA(self.adata, gene_subset, outliers, 
                                                 for_randomset=True, partial_fit=partial_fit)
         else:
@@ -997,7 +1161,8 @@ class ROMA:
                             subsetlist: np.ndarray, 
                             outliers: List[int], 
                             verbose: int = 0, 
-                            prefer_type: str = 'processes', 
+                            prefer_type: str = 'processes',
+                            multiomics: bool = False,
                             incremental: bool = False, 
                             iters: int = 100, 
                             partial_fit: bool = False, 
@@ -1015,6 +1180,8 @@ class ROMA:
             Verbosity level
         prefer_type : str, default='processes'
             Joblib backend preference
+        multiomics : bool, default=False
+            Whether data are multiomics
         incremental : bool, default=False
             Whether to use incremental PCA
         iters : int, default=100
@@ -1055,7 +1222,7 @@ class ROMA:
                 
                 batch_results = Parallel(n_jobs=n_jobs, prefer=prefer_type)(
                     delayed(self.process_iteration)(
-                        sequence, idx, iteration, incremental, partial_fit, algorithm
+                        sequence, idx, iteration, multiomics, incremental, partial_fit, algorithm
                     ) for iteration in range(batch_start, batch_end)
                 )
                 all_results.extend(batch_results)
@@ -1070,7 +1237,7 @@ class ROMA:
             # Standard parallel processing for smaller iteration counts
             results = Parallel(n_jobs=n_jobs, prefer=prefer_type)(
                 delayed(self.process_iteration)(
-                    sequence, idx, iteration, incremental, partial_fit, algorithm
+                    sequence, idx, iteration, multiomics, incremental, partial_fit, algorithm
                 ) for iteration in range(iters)
             )
         
@@ -1106,7 +1273,8 @@ class ROMA:
         # When parallel=False, compute a simple p-value
         if not hasattr(self, 'nulll1') or self.nulll1 is None or len(self.nulll1) == 0:
             # No null distribution available, use default values
-            test_l1 = self.svd.explained_variance_ratio_[0]
+            test_l1 = self.svd.explained_variance_ratio_[0] 
+            
             self.test_l1 = test_l1
             self.p_value = 0.5  # Default p-value when no null distribution
             
@@ -1131,9 +1299,11 @@ class ROMA:
         
         # L1 statistics
         test_l1 = self.svd.explained_variance_ratio_[0]
+        
         p_value = np.mean(null_distribution >= test_l1)
         
         self.test_l1 = test_l1
+        
         self.p_value = p_value
         
         # Median expression statistics
@@ -1269,7 +1439,9 @@ class ROMA:
     def compute(self, 
                 selected_gene_sets: Union[List[str], str] = 'all', 
                 parallel: bool = True, 
-                incremental: bool = False, 
+                incremental: bool = False,
+                multiomics: bool = False,
+                which_mfa: str = "standard",
                 iters: int = 100, 
                 partial_fit: bool = False, 
                 algorithm: str = 'randomized', 
@@ -1290,6 +1462,8 @@ class ROMA:
             Whether to use parallel processing for null distribution computation
         incremental : bool, default=False
             Whether to use incremental PCA instead of truncated SVD
+        multiomics : bool, default=False
+            Whether data are multiomics
         iters : int, default=100
             Number of iterations for null distribution generation
         partial_fit : bool, default=False
@@ -1322,6 +1496,8 @@ class ROMA:
         
         if not self.genesets:
             raise ValueError("No gene sets loaded. Run read_gmt_to_dict() first.")
+
+        self.which_mfa=which_mfa
         
         results = {}
         
@@ -1352,8 +1528,6 @@ class ROMA:
             X_centered = X - np.mean(X, axis=1, keepdims=True)
             X_centered = X_centered - np.mean(X_centered, axis=0, keepdims=True)
         
-
-
         self.adata.X = X_centered.T
         
         # Index genes
@@ -1384,7 +1558,7 @@ class ROMA:
             
             # Outlier detection
             if loocv_on:
-                self.loocv(self.subset, verbose=verbose)
+                self.loocv(self.subset, multiomics, verbose=verbose)
             
             if len(self.outliers) > 0:
                 print(f"Outliers: {self.outliers}, Gene: {self.subsetlist[self.outliers[0]]}")
@@ -1421,7 +1595,9 @@ class ROMA:
             flag = False
             
             # Perform decomposition
-            if incremental:
+            if multiomics:
+                self.robustMFA(self.adata, self.subsetlist, self.outliers)
+            elif incremental:
                 self.robustIncrementalPCA(self.adata, self.subsetlist, self.outliers)
             else:
                 self.robustTruncatedSVD(self.adata, self.subsetlist, self.outliers, algorithm=algorithm)
@@ -1437,7 +1613,8 @@ class ROMA:
                     self.outliers, 
                     verbose=verbose,
                     prefer_type='processes', 
-                    incremental=incremental, 
+                    incremental=incremental,
+                    multiomics=multiomics,
                     iters=iters, 
                     partial_fit=partial_fit,
                     algorithm=algorithm
