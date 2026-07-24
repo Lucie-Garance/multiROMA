@@ -1,41 +1,27 @@
-# pyROMA
+# multiROMA
 
-**Representation and Quantification of Module Activity in single-cell and bulk transcriptomics**
+**Representation and Quantification of Module Activity in multi-omic data**
 
 ---
 
-![Methods Workflow](Methods.png)
+![Methods Workflow](multiROMA_workflow-1.png)
 
 ---
 
 ## Features
 
-* Compute module activity scores for single-cell and bulk RNA-seq data
+* Compute module activity scores for single-cell and bulk dataset with RNA-seq and proteomic data 
 * Seamless integration with AnnData objects (`scanpy`)
 * Support for GMT pathway files (e.g., MSigDB hallmark gene sets)
-* Lightweight and easy to extend
 
 ---
 
 ## Installation
 
-### Create Conda environment
+### Install directly from source
 
 ```bash
-conda env create -f environment.yml
-conda activate pyroma
-```
-
-### Install using Pip
-
-```bash
-pip install roma-analysis
-```
-
-### Or install directly from source
-
-```bash
-git clone https://github.com/altyn-bulmers/pyroma.git
+git clone https://github.com/Lucie-Garance/multiROMA.git
 cd pyroma
 pip install -e .
 ```
@@ -45,16 +31,14 @@ pip install -e .
 ## Quick Start
 
 ```python
-import pyroma
+import roma_gsvd_v2 as Roma
 
 # Initialize ROMA
-roma = pyroma.ROMA()
+roma = Roma.ROMA()
 
 # Assign your AnnData object and GMT file
 roma.adata = adata  # AnnData from scanpy
-
-hallmarks_gmt_path = pyroma.genesets.use_hallmarks()
-roma.gmt   = hallmarks_gmt_path
+roma.gmt   = my_gmt_path
 
 # Compute module activity scores
 roma.compute()
@@ -67,30 +51,17 @@ roma.adata.uns['ROMA_active_modules']
 
 ## Tutorials
 
-Comprehensive tutorials are available on Read the Docs:
+Comprehensive notebooks are available:
 
-- [**Getting started**](https://pyroma.readthedocs.io/en/latest/tutorials/getting_started.html)
-- [**Advanced usage**](https://pyroma.readthedocs.io/en/latest/tutorials/advanced_usage.html)
-- [**Advanced usage (cell-type setting)**](https://pyroma.readthedocs.io/en/latest/tutorials/advanced_usage_ct_setting.html)
----
-
-## Clone with Submodules
-
-If you need submodule content (e.g., additional scripts or data):
-
-```bash
-git clone --recurse-submodules git@github.com:altyn-bulmers/pyroma.git
-```
+- **Preprocessing dataset**: Data_preprocessing.ipynb
+- **MFA method**: MFA_multiROMA.ipynb
+- **GSVD method**: GSVD_multiROMA.ipynb
 
 ---
 
 ## Reproducibility
 
-Companion notebooks and detailed workflows are maintained in a dedicated repository (will be available soon):
-
-* [pyroma\_reproducibility](https://github.com/altyn-bulmers/pyroma_reproducibility)
-
-Core datasets are sourced from [rRoma\_comp](https://github.com/sysbio-curie/rRoma_comp) and included as TSV files in the `datasets/` directory.
+Companion notebooks and detailed workflows will be available soon. For any detailed information, please contact lucie.garance.barot@gmail.com
 
 ---
 

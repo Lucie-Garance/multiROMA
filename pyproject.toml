@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multiroma-analysis"
+version = "0.1.0"
+description = "Representation and Quantification of Module Activity for multiomic data in python"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "Lucie-Garance Barot", email = "lucie.garance.barot@gmail.com"}]
+dependencies = [
+    "numpy>=2.3.5",
+    "pandas>=2.3.3",
+    "prince==0.16.5",
+    "seaborn>=0.13.2",
+    "matplotlib>=3.10.8",
+    "anndata>=0.12.9",
+    "mudata>=0.3.3",
+    "muon>=0.1.7",
+    "mygene>=3.2.2",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.16.3",
+    "seaborn>=0.13.2",
+    "statsmodels>=0.14.6",
+    "scanpy>=1.11.5",
+    "inmoose>=0.9.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
